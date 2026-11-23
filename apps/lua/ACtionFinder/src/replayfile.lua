@@ -135,6 +135,57 @@ local function parse(data)
   return info
 end
 
+-- Copies the position of every car at every `step`-th frame into FFI float arrays, so
+-- the file data (hundreds of MB) can be released afterwards.
+-- Returns { step, count = samples per car, cars = { [carIndex] = { x, y, z } or nil } }.
+-- Cars without position data get nil. A sample at (0,0,0) means "not on track".
+function M.readPositions(data, info, step)
+  step = step or 3
+  local ptr = ffi.cast(u8p, data)
+  local count = math.floor((info.frames - 1) / step) + 1
+  local out = { step = step, count = count, cars = {} }
+  for _, car in ipairs(info.cars) do
+    if car.hasPositions then
+      local x, y, z = ffi.new('float[?]', count), ffi.new('float[?]', count), ffi.new('float[?]', count)
+      for k = 0, count - 1 do
+        local p = ffi.cast(f32p, ptr + car.base + k * step * car.stride + M.OFF_POSITION)
+        x[k], y[k], z[k] = p[0], p[1], p[2]
+      end
+      out.cars[car.index] = { x = x, y = y, z = z }
+    end
+  end
+  return out
+end
+
+-- Turns the track progress (0..1 along the AI line, -1 = unknown) of the samples of one
+-- car into progress over the whole race: laps + fraction, written into `out` (a double
+-- array). A jump of more than half a lap between two known samples is a crossing of the
+-- line. A car that starts within `gridM` metres before the line is on the grid
+-- (progress just below 0). Unknown samples get the last known value; `known` (uint8
+-- array, may be nil) gets 1 for known samples.
+function M.unwrapProgress(raw, count, out, known, lengthM, gridM)
+  local laps, prev = 0, nil
+  local gridFraction = (lengthM and lengthM > 0) and (gridM or 250) / lengthM or 0
+  local last = 0 / 0
+  for k = 0, count - 1 do
+    local p = raw[k]
+    if p >= 0 then
+      if prev == nil then
+        if p > 1 - gridFraction then laps = -1 end
+      else
+        local d = p - prev
+        if d < -0.5 then laps = laps + 1 elseif d > 0.5 then laps = laps - 1 end
+      end
+      prev = p
+      last = laps + p
+      if known then known[k] = 1 end
+    elseif known then
+      known[k] = 0
+    end
+    out[k] = last
+  end
+end
+
 -- Reads the header and car list of a replay held in a Lua string.
 -- Returns info, or nil and an error message.
 function M.readHeader(data)

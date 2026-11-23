@@ -11,6 +11,12 @@ V.__index = V
 V.__add = function(a, b) return vec2(a.x + b.x, a.y + b.y) end
 function vec2(x, y) return setmetatable({ x = x or 0, y = y or 0 }, V) end
 function rgbm(r, g, b, m) return { r = r, g = g, b = b, mult = m } end
+local V3 = {}
+V3.__index = V3
+function V3:set(x, y, z) self.x, self.y, self.z = x, y, z end
+function vec3(x, y, z) return setmetatable({ x = x or 0, y = y or 0, z = z or 0 }, V3) end
+-- Fake AI line: the angle around a centre point of the test track, as 0..1.
+CENTRE_X, CENTRE_Z = 0, 0
 
 local sim = { isReplayActive = true, replayCurrentFrame = 1000, replayFrames = 7107, replayFrameMs = 30,
   replayPlaybackRate = 1, carsCount = 6, focusedCar = 2, trackLengthM = 2500 }
@@ -27,6 +33,10 @@ ac = {
   getDriverName = function(i) return names[i] end,
   focusCar = function(i) calls[#calls + 1] = 'focus ' .. i; sim.focusedCar = i end,
   setReplayPosition = function(f, c) calls[#calls + 1] = 'jump ' .. f; sim.replayCurrentFrame = f end,
+  hasTrackSpline = function() return true end,
+  worldCoordinateToTrackProgress = function(v)
+    return (math.atan2(v.z - CENTRE_Z, v.x - CENTRE_X) / (2 * math.pi)) % 1
+  end,
   getPatchVersion = function() return '0.2.x' end,
   getPatchVersionCode = function() return 3000 end,
   getReplayFilename = function() return nil end,
@@ -52,7 +62,7 @@ ui = setmetatable({
   availableSpaceX = function() return 600 end,
   availableSpaceY = function() return 300 end,
   textLineHeightWithSpacing = function() return 18 end,
-  button = function(label) return (label == '+10 s' and STEP == 5) or label == 'Read file (speed test)' end,
+  button = function(label) return (label == '+10 s' and STEP == 5) end,
   radioButton = function() return false end,
   invisibleButton = function(id) return id == clickRow end,
   itemHovered = function() return true end,
@@ -66,7 +76,7 @@ ui = setmetatable({
 script = {}
 dofile('apps/lua/ACtionFinder/ACtionFinder.lua')
 
-for step = 1, 40 do
+for step = 1, 80 do
   STEP = step
   for i = 0, 5 do
     local c = cars[i]
@@ -81,8 +91,6 @@ for step = 1, 40 do
   script.update(0.1)
   script.windowMain(0.1)
 end
-print('calls: ' .. table.concat(calls, ', '))
-
 -- print the classification (found through the upvalues of script.update)
 local function upvalue(fn, name)
   for i = 1, 200 do
@@ -97,3 +105,14 @@ for _, r in ipairs(cls.rows) do
     r.progress, tostring(r.aheadS and string.format('%.2f', r.aheadS)), tostring(r.aheadM and string.format('%.1f', r.aheadM)),
     tostring(r.leaderS and string.format('%.2f', r.leaderS)), r.level and 'yes' or 'no'))
 end
+
+print('calls: ' .. table.concat(calls, ', '))
+local lapData = upvalue(upvalue(script.update, 'runLapJob'), 'lapData')
+print('lap data: ' .. lapData.state .. ' ' .. tostring(lapData.message) .. string.format(' %.0f%%', lapData.percent))
+if lapData.state == 'ready' then
+  for i = 0, 5 do
+    local p = lapData.progress[i]
+    print(string.format('car %d progress at 0:30 %.3f, 2:00 %.3f, end %.3f', i, p[333], p[1333], p[lapData.count - 1]))
+  end
+end
+
