@@ -11,6 +11,7 @@
 -- The gaps here are estimates from the game's own car data (SPEC 5.1). The exact gaps
 -- from the replay analysis come in a later step.
 
+local ffi = require('ffi')
 local sim = ac.getSim()
 
 local okReplayFile, ReplayFile = pcall(require, 'src/replayfile')
@@ -197,8 +198,34 @@ if hasFunction(ac, 'onReplay') then
   end)
 end
 
+-- Laps from the replay file (filled by the lap job further down): per car the progress
+-- over the race (laps + fraction along the AI line) at every `step`-th frame. With it,
+-- the lap of every car is known right after a jump, also for online cars whose lap count
+-- is not in the replay.
+local lapData = { state = 'none', percent = 0, message = nil, step = 3, count = 0, progress = {} }
+
+-- Race progress of a car at the current replay frame from the replay file, or nil.
+local function fileProgress(index)
+  if lapData.state ~= 'ready' or not replayActive() then return nil end
+  local prog = lapData.progress[index]
+  local frame = field(sim, 'replayCurrentFrame')
+  if not prog or type(frame) ~= 'number' or lapData.count < 2 then return nil end
+  local k = frame / lapData.step
+  local k0 = math.max(0, math.min(lapData.count - 2, math.floor(k)))
+  local w = math.max(0, math.min(1, k - k0))
+  local a, b = prog[k0], prog[k0 + 1]
+  if a ~= a then return nil end            -- NaN: the car was not on track yet
+  if b ~= b then b = a end
+  return a + (b - a) * w
+end
+
 local function carProgress(car, index, lengthM)
   local spline = field(car, 'splinePosition') or 0
+  local fp = fileProgress(index)
+  if fp then
+    -- lap from the file, exact position within the lap from the game
+    return math.floor(fp - spline + 0.5) + spline
+  end
   local laps = field(car, 'lapCount') or 0
   local raw = laps + spline
   -- On the grid, cars behind the line have a spline position near 1 before lap 1.
@@ -387,7 +414,7 @@ end
 -- (e.g. "temp\name.acreplay") or a full path.
 local function resolveReplayPath(name)
   local path = name
-  if not (name:match('^%a:') or name:match('^[/\\][/\\]')) then path = REPLAY_DIR .. '/' .. name end
+  if not (name:match('^%a:') or name:match('^[/\\]')) then path = REPLAY_DIR .. '/' .. name end
   if not fileExists(path) and not path:lower():match('%.acreplay$') and fileExists(path .. '.acreplay') then
     path = path .. '.acreplay'
   end
@@ -423,6 +450,80 @@ local function findReplay()
   rf.path, rf.source = nil, nil
 end
 
+-- Lap job: turns the sampled positions of every car into progress along the AI line
+-- (ac.worldCoordinateToTrackProgress) and unwraps it over the laps. Runs in slices of a
+-- few milliseconds per frame (script.update).
+local lapJob = nil
+local LAP_JOB_BUDGET_S = 0.004
+
+local function startLapJob(info, positions)
+  local frames = field(sim, 'replayFrames')
+  if type(frames) == 'number' and frames > 0 and math.abs(frames - info.frames) > 2 then
+    lapData.state = 'failed'
+    lapData.message = string.format('The replay that plays has %d frames, the file %d: not the same replay, '
+      .. 'so the laps from the file are not used.', frames, info.frames)
+    return
+  end
+  if not hasFunction(ac, 'worldCoordinateToTrackProgress') then
+    lapData.state, lapData.message = 'failed', 'This CSP version has no ac.worldCoordinateToTrackProgress ('
+      .. cspVersion() .. ').'
+    return
+  end
+  if hasFunction(ac, 'hasTrackSpline') and not ac.hasTrackSpline() then
+    lapData.state, lapData.message = 'failed', 'This track has no AI line (fast_lane.ai): laps cannot be '
+      .. 'taken from the replay file.'
+    return
+  end
+  local lengthM = field(sim, 'trackLengthM') or 0
+  local count = positions.count
+  lapData.step, lapData.count = positions.step, count
+  lapData.state, lapData.percent, lapData.progress = 'computing', 0, {}
+  local cars = {}
+  for index, c in pairs(positions.cars) do cars[#cars + 1] = { index = index, pos = c } end
+  table.sort(cars, function(a, b) return a.index < b.index end)
+
+  lapJob = coroutine.create(function()
+    local v = vec3()
+    local raw = ffi.new('float[?]', count)
+    local total = math.max(1, #cars * count)
+    local doneSamples = 0
+    for _, car in ipairs(cars) do
+      local x, y, z = car.pos.x, car.pos.y, car.pos.z
+      for k = 0, count - 1 do
+        if x[k] == 0 and y[k] == 0 and z[k] == 0 then
+          raw[k] = -1
+        else
+          v:set(x[k], y[k], z[k])
+          raw[k] = ac.worldCoordinateToTrackProgress(v)
+        end
+        if k % 200 == 199 then
+          lapData.percent = (doneSamples + k) / total * 100
+          if clock() > lapData.deadline then coroutine.yield() end
+        end
+      end
+      doneSamples = doneSamples + count
+      local prog = ffi.new('double[?]', count)
+      ReplayFile.unwrapProgress(raw, count, prog, nil, lengthM, 250)
+      lapData.progress[car.index] = prog
+    end
+    lapData.percent = 100
+    lapData.state = 'ready'
+    lapData.message = string.format('Laps from the replay file (%d cars).', #cars)
+  end)
+end
+
+local function runLapJob()
+  if not lapJob then return end
+  lapData.deadline = clock() + LAP_JOB_BUDGET_S
+  local ok, err = coroutine.resume(lapJob)
+  if not ok then
+    lapData.state, lapData.message = 'failed', 'Computing the laps failed: ' .. tostring(err)
+    lapJob = nil
+  elseif coroutine.status(lapJob) == 'dead' then
+    lapJob = nil
+  end
+end
+
 local function readReplay()
   if not ReplayFile then
     rf.status, rf.statusGood = 'The module src/replayfile.lua could not be loaded: ' .. tostring(select(2,
@@ -431,10 +532,12 @@ local function readReplay()
   end
   if not rf.path then
     rf.status, rf.statusGood = 'No replay file found. Use "Open file...".', false
+    lapData.state, lapData.message = 'failed', 'The replay file was not found (Replay file tab: "Open file...").'
     return
   end
   local path = rf.path
   rf.info, rf.loading = nil, true
+  lapData.state, lapData.percent, lapData.message, lapData.progress = 'reading', 0, nil, {}
   rf.status, rf.statusGood = 'Reading ' .. fileName(path) .. ' ...', nil
   local t0 = clock()
   local function done(err, data)
@@ -442,19 +545,28 @@ local function readReplay()
     local t1 = clock()
     if err or type(data) ~= 'string' then
       rf.status, rf.statusGood = 'Could not read the file: ' .. tostring(err or 'no data'), false
+      lapData.state, lapData.message = 'failed', 'The replay file could not be read: ' .. tostring(err or 'no data')
       return
     end
     local info, perr = ReplayFile.readHeader(data)
     local t2 = clock()
     if not info then
       rf.status, rf.statusGood = 'Not a replay this app can read: ' .. tostring(perr), false
+      lapData.state, lapData.message = 'failed', 'The replay file could not be read: ' .. tostring(perr)
     else
       info.sizeMB = #data / 1e6
       info.loadMs = (t1 - t0) * 1000
       info.parseMs = (t2 - t1) * 1000
+      local ok, positions = pcall(ReplayFile.readPositions, data, info, lapData.step)
+      info.positionsMs = (clock() - t2) * 1000
       rf.info = info
-      rf.status, rf.statusGood = string.format('Read %.1f MB in %.0f ms (car list in %.1f ms).', info.sizeMB,
-        info.loadMs, info.parseMs), true
+      rf.status, rf.statusGood = string.format('Read %.1f MB in %.0f ms (car list in %.1f ms, positions in %.0f ms).',
+        info.sizeMB, info.loadMs, info.parseMs, info.positionsMs), true
+      if ok then
+        startLapJob(info, positions)
+      else
+        lapData.state, lapData.message = 'failed', 'Reading the positions failed: ' .. tostring(positions)
+      end
     end
     data = nil
     collectgarbage()
@@ -500,8 +612,14 @@ function script.update(dt)
   if replay ~= wasReplay then
     wasReplay = replay
     resetTracking()
-    if replay and rf.source ~= 'chosen by hand' then findReplay() end
+    if replay then
+      if rf.source ~= 'chosen by hand' then findReplay() end
+      readReplay()                     -- laps from the file (SPEC 4)
+    else
+      lapJob, lapData.state, lapData.progress = nil, 'none', {}
+    end
   end
+  runLapJob()
   checkJump()
   local now = clock()
   if now - cls.updated >= 0.1 then
@@ -563,6 +681,18 @@ end
 
 local function drawClassification()
   ui.textColored('Estimated gaps (from the spline position): exact gaps come with the replay analysis.', DIM)
+  if replayActive() then
+    if lapData.state == 'ready' then
+      ui.textColored(lapData.message, DIM)
+    elseif lapData.state == 'reading' then
+      ui.textColored('Laps: reading the replay file ...', DIM)
+    elseif lapData.state == 'computing' then
+      ui.textColored(string.format('Laps: reading the replay file ... %.0f %%', lapData.percent), DIM)
+    else
+      textWrappedColored('Laps from the game: online cars stay on lap 1 in a replay, so the order is wrong. '
+        .. (lapData.message or ''), WARN)
+    end
+  end
   if cls.lengthM <= 0 then
     ui.textColored('This track has no AI line length (sim.trackLengthM): gaps cannot be estimated.', WARN)
   end
@@ -671,6 +801,10 @@ local function drawReplayFile()
   if ui.button('Search again') then rf.source = nil; rf.info = nil; findReplay() end
   if rf.status then textWrappedColored(rf.status, rf.statusGood == false and WARN or rf.statusGood and GOOD or DIM) end
 
+  if lapData.message or lapData.state == 'computing' then
+    local text = lapData.state == 'computing' and string.format('Laps: %.0f %%', lapData.percent) or lapData.message
+    textWrappedColored(text, lapData.state == 'failed' and WARN or lapData.state == 'ready' and GOOD or DIM)
+  end
   local info = rf.info
   if not info then return end
   ui.text(string.format('Format %d, %s ms per frame, %d frames (%s), track %s %s, %d cars.', info.version,
@@ -696,7 +830,7 @@ local function drawReplayFile()
   ui.childWindow('##cars', vec2(0, ui.availableSpaceY()), false, function()
     local p = ui.getCursor()
     local cols = { 0, 30, 230, 430, 500, 545 }
-    local titles = { '#', 'Driver in file', 'Driver in game', 'Frames', 'Laps', 'Position data' }
+    local titles = { '#', 'Driver in file', 'Driver in game', 'Frames', 'Laps in file', 'Position data' }
     for k, x in ipairs(cols) do
       ui.setCursor(vec2(p.x + x, p.y))
       ui.textColored(titles[k], DIM)

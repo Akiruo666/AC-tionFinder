@@ -408,7 +408,15 @@ From `extension/internal/lua-sdk/ac_apps/lib.lua` of the user's CSP install:
 | Reading files | `io.loadAsync(path, cb)` (does not block the frame), `io.load`, `io.fileSize`, `io.fileExists` |
 | Timing | `os.preciseClock()` |
 
-Still to be confirmed in the game (the *Jump test* and *CSP check* tabs of the proof of concept
-show it): whether the jump works while the replay plays or only while paused, whether the focus
-survives a jump, whether `car.lapCount` counts laps in replays, and whether car N in the replay
-file is car N in the game.
+**Tested in the game by the user (proof of concept 0.1, online TCR replay at Curitiba,
+30 cars of which 15 with data, 55,383 frames, 537 MB):**
+- `ac.setReplayPosition` jumps, and `ac.focusCar` follows the chosen car after the jump.
+- `ac.getReplayFilename()` gives the full path of the replay.
+- Reading the whole file with `io.loadAsync` took 176 ms, the car list 1 ms.
+- Car N in the file is car N in the game (15 of 15 cars with data had the same driver).
+- **`car.lapCount` does not count laps for online cars in a replay** (only the car that
+  recorded the replay has laps; the others stay on lap 1). Counting line crossings while the
+  replay plays breaks at every jump. So the lap of every car comes from the replay file:
+  positions at every 3rd frame → `ac.worldCoordinateToTrackProgress` → unwrapped over the laps
+  (`replayfile.unwrapProgress`); live, the lap is `round(fileProgress - splinePosition)` and the
+  position within the lap is the game's `splinePosition`.
