@@ -389,3 +389,26 @@ the OvertakeFinder repository prints the full list.
 
   Guard calls that may not exist with `pcall`, and show a clear message with
   the CSP version when something is missing.
+
+---
+
+## 11. CSP API found in the Lua SDK (checked against the user's SDK files)
+
+From `extension/internal/lua-sdk/ac_apps/lib.lua` of the user's CSP install:
+
+| Need | API |
+|---|---|
+| Jump in the replay | `ac.setReplayPosition(frameIndex, playCounter)`: 0-based frame, `playCounter` 0–1 is the transition between frames |
+| Replay state | `sim.isReplayActive`, `sim.replayCurrentFrame` (0-based), `sim.replayFrames`, `sim.replayFrameMs`, `sim.replayPlaybackRate` |
+| Replay file | `ac.getReplayFilename()`: full file name when AC was launched in replay mode, else `nil` (then use race.ini, section 3) |
+| Replay jumped | `ac.onReplay(function(event) end)` with event `'start'`, `'stop'` or `'jump'` |
+| Follow a car | `ac.focusCar(index)`, `sim.focusedCar` |
+| Progress along the AI line | `ac.hasTrackSpline()`, `ac.worldCoordinateToTrackProgress(vec3)` (−1 without a spline), `ac.worldCoordinateToTrack(vec3)`, `sim.trackLengthM` |
+| Car data | `car.splinePosition`, `car.lapCount`, `car.speedKmh`, `car.isInPitlane`, `car.isActive`, `car.distanceDrivenSessionKm`, `ac.getDriverName(i)` |
+| Reading files | `io.loadAsync(path, cb)` (does not block the frame), `io.load`, `io.fileSize`, `io.fileExists` |
+| Timing | `os.preciseClock()` |
+
+Still to be confirmed in the game (the *Jump test* and *CSP check* tabs of the proof of concept
+show it): whether the jump works while the replay plays or only while paused, whether the focus
+survives a jump, whether `car.lapCount` counts laps in replays, and whether car N in the replay
+file is car N in the game.
