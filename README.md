@@ -17,9 +17,15 @@ open *AC-tionFinder* from the app bar on the right.
 
 ## What the proof of concept does
 
-- **Classification**: every car at the current moment, ordered by lap + spline position, with the
-  estimated gap to the car ahead (time and metres/feet) and to the leader, rows coloured by the gap
-  to the car ahead. Click a row (for example the name) to follow that car.
+- **Classification**, in replays and live (the status line says which: replay, or the live
+  session type). Two views:
+  - *On track* (default): every car at the current moment, ordered by lap + spline position, with
+    the estimated gap to the car ahead (time and metres/feet) and to the leader, rows coloured by
+    the gap to the car ahead;
+  - *Lap times*: ordered by best lap, like the practice and qualifying classification.
+
+  Click a row (for example the name) to follow that car. The lap count is reset on a new
+  session, a car teleport (back to the pits) and a driver connecting or disconnecting.
 - **Jump test**: jumps in the replay with `ac.setReplayPosition` (buttons, slider) and keeps
   following the same car, or jumps back 10 s and follows another car. It shows whether the jump worked.
 - **Replay file**: finds the replay that plays (`ac.getReplayFilename()`, else `cfg/race.ini`),
@@ -33,8 +39,10 @@ open *AC-tionFinder* from the app bar on the right.
 luajit tests/test_replayfile.lua <file.acreplay>
 python3 tests/compare_python.py <OvertakeFinder checkout> <file.acreplay>
 luajit tests/smoke_app.lua <file.acreplay>
+luajit tests/live_sessions.lua
 ```
 
 The first two print the same car list (Lua reader against the Python reader of AC Overtake
 Finder). The smoke test runs the app with fake game functions to catch Lua errors; it does not
-show what the game really does.
+show what the game really does. `live_sessions.lua` plays qualifying followed by a race with fake
+cars (lap counts reset to 0, grid, a late lap count, a teleport) and checks order and laps.

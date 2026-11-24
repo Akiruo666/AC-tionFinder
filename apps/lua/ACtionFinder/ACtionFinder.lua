@@ -79,6 +79,7 @@ local settings = {
   closeS = 1.0,      -- gap that counts as a real fight (yellow up to here)
   battleS = 2.0,     -- still in battle (grey up to here)
   feet = false,      -- distances in feet instead of metres
+  view = 'track',    -- 'track': order on the track with gaps; 'times': ordered by best lap
 }
 
 local function fmtDist(m)
@@ -180,11 +181,16 @@ end
 
 -------------------------------------------------------------------------------- live classification (SPEC 5.1)
 
--- Progress = laps + spline position. The lap count from the game can change a moment
--- before or after the spline position wraps around, and in some replays it never changes
--- (network cars). So the progress is unwrapped per car: a jump of about one lap between
--- two updates is a crossing of the line and adds or removes a lap.
-local tracking = {}        -- car index -> { raw = last raw progress, offset = laps added }
+-- Progress = laps + spline position. Every car has its own lap counter here:
+--  * it starts from the game's lap count (-1 for a car on the grid behind the line);
+--  * it counts crossings of the line itself (spline position from > 0.8 to < 0.2, or back),
+--    because the game's lap count changes a moment before or after the spline wraps, and
+--    in replays it never changes for online cars;
+--  * live, it takes the game's lap count again whenever they differ away from the line
+--    (after a teleport to the pits, a new session, a counting error);
+--  * it is cleared on a new session, a replay start/stop/jump, a car teleport and when a
+--    driver connects or disconnects (their car slot is reused).
+local tracking = {}        -- car index -> { laps = own lap counter, spline = last spline }
 local lastTrackFrame = nil
 
 local function resetTracking()
@@ -192,10 +198,43 @@ local function resetTracking()
   lastTrackFrame = nil
 end
 
-if hasFunction(ac, 'onReplay') then
-  pcall(ac.onReplay, function(event)
-    if event == 'jump' or event == 'start' or event == 'stop' then resetTracking() end
-  end)
+local function resetCar(index)
+  if type(index) == 'number' then tracking[index] = nil end
+end
+
+-- Events that make the counted laps invalid. Every call is guarded: older CSP versions
+-- may lack some of them (the CSP check tab lists which ones are there).
+local events = {}
+local function listen(name, ...)
+  if not hasFunction(ac, name) then events[name] = false return end
+  local ok = pcall(ac[name], ...)
+  events[name] = ok
+end
+listen('onReplay', function(event)
+  if event == 'jump' or event == 'start' or event == 'stop' then resetTracking() end
+end)
+listen('onSessionStart', function() resetTracking() end)
+listen('onCarJumped', -1, resetCar)
+listen('onClientConnected', resetCar)
+listen('onClientDisconnected', resetCar)
+
+-- Session change without the event (older CSP): watch the session index and type.
+local session = { index = nil, kind = nil, changes = 0 }
+local function checkSession()
+  local index, kind = field(sim, 'currentSessionIndex'), field(sim, 'raceSessionType')
+  if index ~= session.index or kind ~= session.kind then
+    if session.index ~= nil or session.kind ~= nil then session.changes = session.changes + 1 end
+    session.index, session.kind = index, kind
+    resetTracking()
+  end
+end
+
+local SESSION_NAMES = { [0] = 'Session', 'Practice', 'Qualifying', 'Race', 'Hotlap', 'Time attack', 'Drift', 'Drag' }
+local function isRaceSession()
+  return session.kind == 3
+end
+local function sessionName()
+  return SESSION_NAMES[session.kind or 0] or 'Session'
 end
 
 -- Laps from the replay file (filled by the lap job further down): per car the progress
@@ -226,23 +265,28 @@ local function carProgress(car, index, lengthM)
     -- lap from the file, exact position within the lap from the game
     return math.floor(fp - spline + 0.5) + spline
   end
-  local laps = field(car, 'lapCount') or 0
-  local raw = laps + spline
-  -- On the grid, cars behind the line have a spline position near 1 before lap 1.
-  if laps == 0 and spline > 0.5 and lengthM > 0 then
-    local km = field(car, 'distanceDrivenSessionKm')
-    if type(km) == 'number' and km * 1000 < spline * lengthM * 0.5 then raw = spline - 1 end
+  -- The game's lap count, -1 for a car on the grid behind the line before lap 1.
+  local gameLaps = field(car, 'lapCount') or 0
+  if gameLaps == 0 and spline > 0.5 then
+    if isRaceSession() and field(sim, 'isSessionStarted') == false then
+      gameLaps = -1
+    elseif lengthM > 0 then
+      local km = field(car, 'distanceDrivenSessionKm')
+      if type(km) == 'number' and km * 1000 < spline * lengthM * 0.5 then gameLaps = -1 end
+    end
   end
   local t = tracking[index]
   if not t then
-    t = { raw = raw, offset = 0 }
+    t = { laps = gameLaps, spline = spline }
     tracking[index] = t
   else
-    local d = raw - t.raw
-    if d < -0.5 then t.offset = t.offset + 1 elseif d > 0.5 then t.offset = t.offset - 1 end
-    t.raw = raw
+    if t.spline > 0.8 and spline < 0.2 then t.laps = t.laps + 1
+    elseif t.spline < 0.2 and spline > 0.8 then t.laps = t.laps - 1 end
+    t.spline = spline
+    -- Live the game's count is right away from the line. (In a replay it is not.)
+    if not replayActive() and t.laps ~= gameLaps and spline > 0.1 and spline < 0.9 then t.laps = gameLaps end
   end
-  return raw + t.offset
+  return t.laps + spline
 end
 
 -- Estimated time for the car behind to cover `dp` laps of progress.
@@ -256,7 +300,7 @@ local function estimateSeconds(dp, row, lengthM)
   return dp * row.refLapMs / 1000
 end
 
-local cls = { rows = {}, lengthM = 0, updated = -1 }
+local cls = { rows = {}, timeRows = {}, lengthM = 0, updated = -1 }
 
 local function updateClassification()
   local lengthM = field(sim, 'trackLengthM') or 0
@@ -283,6 +327,9 @@ local function updateClassification()
         speedKmh = field(car, 'speedKmh') or 0,
         pit = field(car, 'isInPitlane') == true,
         refLapMs = (best > 0 and best) or (prev > 0 and prev) or nil,
+        bestMs = best > 0 and best or nil,
+        lastMs = prev > 0 and prev or nil,
+        lapCount = field(car, 'lapCount') or 0,
       }
       rows[#rows + 1] = row
     end
@@ -315,6 +362,21 @@ local function updateClassification()
     end
   end
   cls.rows = rows
+
+  -- The same cars ordered by best lap (cars without a lap time last).
+  local times = {}
+  for k, row in ipairs(rows) do times[k] = row end
+  table.sort(times, function(a, b)
+    if (a.bestMs ~= nil) ~= (b.bestMs ~= nil) then return a.bestMs ~= nil end
+    if a.bestMs and a.bestMs ~= b.bestMs then return a.bestMs < b.bestMs end
+    return a.pos < b.pos
+  end)
+  for k, row in ipairs(times) do
+    row.timePos = k
+    row.bestAheadMs = (k > 1 and row.bestMs and times[k - 1].bestMs) and row.bestMs - times[k - 1].bestMs or nil
+    row.bestLeaderMs = (k > 1 and row.bestMs and times[1].bestMs) and row.bestMs - times[1].bestMs or nil
+  end
+  cls.timeRows = times
 end
 
 -------------------------------------------------------------------------------- jump test
@@ -608,6 +670,7 @@ end
 local wasReplay = false
 
 function script.update(dt)
+  checkSession()
   local replay = replayActive()
   if replay ~= wasReplay then
     wasReplay = replay
@@ -638,13 +701,52 @@ local function statusLine()
       tostring(field(sim, 'replayCurrentFrame') or '?'), tostring(field(sim, 'replayFrames') or '?'),
       tostring(field(sim, 'replayPlaybackRate') or '?')))
   else
-    ui.textColored('No replay is playing. The classification works live too; the tests need a replay.', DIM)
+    local count = field(sim, 'sessionsCount')
+    ui.text(string.format('Live: %s%s', sessionName(), (session.index and type(count) == 'number' and count > 0)
+      and string.format(' (session %d of %d)', session.index + 1, count) or ''))
   end
   if notice then
     textWrappedColored(notice, WARN)
     ui.sameLine()
     if ui.button('OK##notice') then notice = nil end
   end
+end
+
+-- 1:23.456
+local function fmtLapTime(ms)
+  if not ms then return '-' end
+  local s = ms / 1000
+  local m = math.floor(s / 60)
+  return string.format('%d:%06.3f', m, s - m * 60)
+end
+
+local function fmtLapDelta(ms)
+  if not ms then return '-' end
+  return string.format('+%.3f', ms / 1000)
+end
+
+local TIME_COLUMNS = {
+  { title = 'Pos', x = 4 },
+  { title = 'Driver', x = 40 },
+  { title = 'Best lap', x = 250 },
+  { title = 'Gap ahead', x = 335 },
+  { title = 'To P1', x = 415 },
+  { title = 'Last lap', x = 495 },
+  { title = 'Laps', x = 580 },
+  { title = '', x = 625 },
+}
+
+local function timeRowCells(row)
+  return {
+    tostring(row.timePos),
+    row.name,
+    fmtLapTime(row.bestMs),
+    row.timePos == 1 and (row.bestMs and 'Fastest' or '') or fmtLapDelta(row.bestAheadMs),
+    row.timePos == 1 and '' or fmtLapDelta(row.bestLeaderMs),
+    fmtLapTime(row.lastMs),
+    tostring(row.lapCount),
+    row.pit and 'PIT' or '',
+  }
 end
 
 local COLUMNS = {
@@ -696,14 +798,29 @@ local function drawClassification()
   if cls.lengthM <= 0 then
     ui.textColored('This track has no AI line length (sim.trackLengthM): gaps cannot be estimated.', WARN)
   end
-  if ui.radioButton('Metres', not settings.feet) then settings.feet = false end
+  if ui.radioButton('On track', settings.view == 'track') then settings.view = 'track' end
+  if ui.itemHovered() then ui.setTooltip('Order on the track now, with the time and distance to the car ahead.') end
   ui.sameLine()
-  if ui.radioButton('Feet', settings.feet) then settings.feet = true end
+  if ui.radioButton('Lap times', settings.view == 'times') then settings.view = 'times' end
+  if ui.itemHovered() then ui.setTooltip('Ordered by best lap, like the classification of practice and qualifying.') end
+  local byTimes = settings.view == 'times'
+  if not byTimes then
+    ui.sameLine(0, 30)
+    if ui.radioButton('Metres', not settings.feet) then settings.feet = false end
+    ui.sameLine()
+    if ui.radioButton('Feet', settings.feet) then settings.feet = true end
+  end
   ui.sameLine(0, 30)
   ui.textColored('Click a row to follow that car.', DIM)
+  if byTimes and replayActive() then
+    ui.textColored('In replays the game often has no lap times for online cars.', DIM)
+  end
 
+  local columns = byTimes and TIME_COLUMNS or COLUMNS
+  local rows = byTimes and cls.timeRows or cls.rows
+  local cellsOf = byTimes and timeRowCells or rowCells
   local start = ui.getCursor()
-  for _, c in ipairs(COLUMNS) do
+  for _, c in ipairs(columns) do
     ui.setCursor(vec2(start.x + c.x, start.y))
     ui.textColored(c.title, DIM)
   end
@@ -713,13 +830,13 @@ local function drawClassification()
     local focused = focusedCar()
     local width = ui.availableSpaceX()
     local h = ui.textLineHeightWithSpacing()
-    for _, row in ipairs(cls.rows) do
+    for _, row in ipairs(rows) do
       local p = ui.getCursor()
-      local level = row.level
+      local level = (not byTimes) and row.level or nil
       if level then ui.drawRectFilled(p, vec2(p.x + width, p.y + h), level.light) end
-      local cells = rowCells(row)
+      local cells = cellsOf(row)
       local colour = level and DARK_TEXT or WHITE
-      for k, c in ipairs(COLUMNS) do
+      for k, c in ipairs(columns) do
         ui.setCursor(vec2(p.x + c.x, p.y))
         local text = cells[k]
         if k == 1 and row.index == focused then text = '> ' .. text end
@@ -735,7 +852,7 @@ local function drawClassification()
         ui.drawRect(p, vec2(p.x + width, p.y + h), level and level.strong or DIM)
       end
     end
-    if #cls.rows == 0 then ui.textColored('No cars.', DIM) end
+    if #rows == 0 then ui.textColored('No cars.', DIM) end
   end)
 end
 
@@ -864,10 +981,16 @@ local function drawCspCheck()
     ui.textColored('  io.' .. n .. ': ' .. yesNo(hasFunction(io, n)), hasFunction(io, n) and WHITE or WARN)
   end
   ui.textColored('  os.openFileDialog: ' .. yesNo(hasFunction(os, 'openFileDialog')), WHITE)
+  ui.text('Events used for resetting the lap count:')
+  for _, n in ipairs({ 'onReplay', 'onSessionStart', 'onCarJumped', 'onClientConnected', 'onClientDisconnected' }) do
+    ui.textColored('  ac.' .. n .. ': ' .. yesNo(events[n]), events[n] and WHITE or WARN)
+  end
+  ui.textColored(string.format('  session changes seen: %d', session.changes), DIM)
   ui.textColored('  module src/replayfile.lua: ' .. (ReplayFile and 'loaded' or 'NOT loaded'), ReplayFile and WHITE or WARN)
   ui.text('Sim fields:')
   for _, n in ipairs({ 'isReplayActive', 'replayCurrentFrame', 'replayFrames', 'replayFrameMs', 'replayPlaybackRate',
-    'carsCount', 'focusedCar', 'trackLengthM' }) do
+    'carsCount', 'focusedCar', 'trackLengthM', 'currentSessionIndex', 'sessionsCount', 'raceSessionType',
+    'isSessionStarted' }) do
     ui.textColored('  sim.' .. n .. ': ' .. tostring(field(sim, n)), DIM)
   end
   local f = focusedCar()
