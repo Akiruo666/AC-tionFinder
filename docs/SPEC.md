@@ -420,3 +420,19 @@ From `extension/internal/lua-sdk/ac_apps/lib.lua` of the user's CSP install:
   positions at every 3rd frame → `ac.worldCoordinateToTrackProgress` → unwrapped over the laps
   (`replayfile.unwrapProgress`); live, the lap is `round(fileProgress - splinePosition)` and the
   position within the lap is the game's `splinePosition`.
+
+### 11.1 Live sessions (version 0.3)
+
+Found by the user online: after the switch from qualifying to the race the order was wrong
+(they finished 11th and the app showed them 1st or 2nd). Cause: the per-car lap correction was
+never cleared live, so the drop of every lap count to 0 at the new session, and teleports to
+the pits, left a different error per car. Now:
+- every car has its own lap counter: it starts from the game's lap count (−1 on the grid
+  behind the line: race not started, or almost no distance driven), counts line crossings
+  itself (spline > 0.8 → < 0.2 and back), and live takes the game's count again when they
+  differ away from the line (spline 0.1–0.9). In replays the game's count is not used for this.
+- it is cleared on `ac.onSessionStart`, a change of `sim.currentSessionIndex` /
+  `sim.raceSessionType` (for CSP versions without the event), `ac.onReplay`,
+  `ac.onCarJumped(-1, …)`, `ac.onClientConnected` and `ac.onClientDisconnected`.
+- two views with a switch, default *On track* (order on the track, gaps in time and distance);
+  *Lap times* orders by `car.bestLapTimeMs` (practice / qualifying classification).
