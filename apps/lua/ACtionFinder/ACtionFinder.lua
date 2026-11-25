@@ -16,6 +16,8 @@ local sim = ac.getSim()
 
 local okReplayFile, ReplayFile = pcall(require, 'src/replayfile')
 if not okReplayFile then ReplayFile = nil end
+local okNames, Names = pcall(require, 'src/names')
+if not okNames then Names = nil end
 
 -------------------------------------------------------------------------------- helpers
 
@@ -80,7 +82,26 @@ local settings = {
   battleS = 2.0,     -- still in battle (grey up to here)
   feet = false,      -- distances in feet instead of metres
   view = 'track',    -- 'track': order on the track with gaps; 'times': ordered by best lap
+  towerInitials = false,  -- tower: initials instead of full names
 }
+
+-- Settings kept between sessions (Documents\Assetto Corsa\cfg\extension\state\lua).
+local stored = nil
+do
+  local ok, s = pcall(ac.storage, { feet = false, towerInitials = false })
+  if ok and s ~= nil then
+    stored = s
+    pcall(function()
+      settings.feet = stored.feet == true
+      settings.towerInitials = stored.towerInitials == true
+    end)
+  end
+end
+
+local function setSetting(key, value)
+  settings[key] = value
+  if stored then pcall(function() stored[key] = value end) end
+end
 
 local function fmtDist(m)
   if m == nil then return '-' end
@@ -665,6 +686,75 @@ local function openReplayDialog()
   end)
 end
 
+-------------------------------------------------------------------------------- tower data
+
+-- Per car: label (full name or initials) and livery icon. Refreshed every 2 s, because
+-- online a car slot can get another driver or skin.
+local tower = { meta = {}, refreshed = -100, shotHidden = false, windowId = 'tower', windowResult = nil }
+local CARS_DIR = ac.getFolder(ac.FolderID.ContentCars) or ''
+
+local function safeCall(fn, ...)
+  if type(fn) ~= 'function' then return nil end
+  local ok, value = pcall(fn, ...)
+  if ok then return value end
+  return nil
+end
+
+-- The skin's livery.png; if that file is not there, CSP's own livery icon of the car.
+local function liveryImage(index)
+  local carId, skin = safeCall(ac.getCarID, index), safeCall(ac.getCarSkinID, index)
+  if type(carId) == 'string' and type(skin) == 'string' and CARS_DIR ~= '' then
+    local path = CARS_DIR .. '/' .. carId .. '/skins/' .. skin .. '/livery.png'
+    if fileExists(path) then return path, carId .. '/' .. skin end
+  end
+  return 'car' .. index .. '::special::livery', tostring(carId) .. '/' .. tostring(skin)
+end
+
+local function refreshTowerMeta()
+  local count = field(sim, 'carsCount') or 0
+  local drivers = {}
+  for i = 0, count - 1 do drivers[i] = driverName(i) end
+  local initials = Names and Names.uniqueInitials(drivers) or {}
+  for i = 0, count - 1 do
+    local m = tower.meta[i] or {}
+    m.name = drivers[i]
+    m.initials = initials[i] or drivers[i]
+    local key = tostring(safeCall(ac.getCarID, i)) .. '/' .. tostring(safeCall(ac.getCarSkinID, i))
+    if m.skinKey ~= key then m.image, m.skinKey = liveryImage(i) end
+    tower.meta[i] = m
+  end
+end
+
+-- The tower hides itself while CSP makes a screenshot (photo mode): the window is
+-- closed for the shot and opened again afterwards.
+local function hideTowerForScreenshot()
+  local shooting = field(sim, 'isMakingScreenshot') == true
+  if shooting and not tower.shotHidden then
+    if hasFunction(ac, 'isWindowOpen') and hasFunction(ac, 'setWindowOpen') then
+      local ok, open = pcall(ac.isWindowOpen, tower.windowId)
+      if ok and open then
+        local okClose, err = pcall(ac.setWindowOpen, tower.windowId, false)
+        tower.windowResult = okClose and 'closed for a screenshot' or ('could not close: ' .. tostring(err))
+        tower.shotHidden = okClose
+      end
+    end
+  elseif not shooting and tower.shotHidden then
+    pcall(ac.setWindowOpen, tower.windowId, true)
+    tower.shotHidden = false
+    tower.windowResult = 'opened again after the screenshot'
+  end
+end
+
+local function updateTower()
+  hideTowerForScreenshot()
+  local now = clock()
+  if now - tower.refreshed >= 2 then
+    tower.refreshed = now
+    local ok, err = pcall(refreshTowerMeta)
+    if not ok then notice = 'Tower: ' .. tostring(err) end
+  end
+end
+
 -------------------------------------------------------------------------------- update
 
 local wasReplay = false
@@ -684,6 +774,7 @@ function script.update(dt)
   end
   runLapJob()
   checkJump()
+  updateTower()
   local now = clock()
   if now - cls.updated >= 0.1 then
     cls.updated = now
@@ -806,12 +897,17 @@ local function drawClassification()
   local byTimes = settings.view == 'times'
   if not byTimes then
     ui.sameLine(0, 30)
-    if ui.radioButton('Metres', not settings.feet) then settings.feet = false end
+    if ui.radioButton('Metres', not settings.feet) then setSetting('feet', false) end
     ui.sameLine()
-    if ui.radioButton('Feet', settings.feet) then settings.feet = true end
+    if ui.radioButton('Feet', settings.feet) then setSetting('feet', true) end
   end
   ui.sameLine(0, 30)
-  ui.textColored('Click a row to follow that car.', DIM)
+  ui.textColored('Tower:', DIM)
+  ui.sameLine()
+  if ui.radioButton('Names', not settings.towerInitials) then setSetting('towerInitials', false) end
+  ui.sameLine()
+  if ui.radioButton('Initials', settings.towerInitials) then setSetting('towerInitials', true) end
+  ui.textColored('Click a row to follow that car. The tower is a separate window in the app bar.', DIM)
   if byTimes and replayActive() then
     ui.textColored('In replays the game often has no lap times for online cars.', DIM)
   end
@@ -986,6 +1082,14 @@ local function drawCspCheck()
     ui.textColored('  ac.' .. n .. ': ' .. yesNo(events[n]), events[n] and WHITE or WARN)
   end
   ui.textColored(string.format('  session changes seen: %d', session.changes), DIM)
+  ui.text('Tower:')
+  ui.textColored('  module src/names.lua: ' .. (Names and 'loaded' or 'NOT loaded'), Names and WHITE or WARN)
+  ui.textColored('  settings kept between sessions (ac.storage): ' .. yesNo(stored ~= nil), stored and WHITE or WARN)
+  local okOpen, open = pcall(ac.isWindowOpen, tower.windowId)
+  ui.textColored('  ac.isWindowOpen(\'' .. tower.windowId .. '\'): ' .. (okOpen and tostring(open) or 'not available'), DIM)
+  ui.textColored('  hide for screenshots: ' .. tostring(tower.windowResult or 'no screenshot yet'), DIM)
+  local f = focusedCar()
+  if f and tower.meta[f] then ui.textColored('  livery of the followed car: ' .. tostring(tower.meta[f].image), DIM) end
   ui.textColored('  module src/replayfile.lua: ' .. (ReplayFile and 'loaded' or 'NOT loaded'), ReplayFile and WHITE or WARN)
   ui.text('Sim fields:')
   for _, n in ipairs({ 'isReplayActive', 'replayCurrentFrame', 'replayFrames', 'replayFrameMs', 'replayPlaybackRate',
@@ -1002,6 +1106,78 @@ local function drawCspCheck()
         'isActive', 'bestLapTimeMs', 'previousLapTimeMs', 'racePosition' }) do
         ui.textColored('  car.' .. n .. ': ' .. tostring(field(car, n)), DIM)
       end
+    end
+  end
+end
+
+-------------------------------------------------------------------------------- tower window
+
+local TOWER_STRIPE = rgbm(1, 1, 1, 0.04)
+
+local function towerGap(row)
+  if row.pos == 1 then return 'Leader' end
+  if row.pit then return 'PIT' end
+  if row.aheadLaps then return row.aheadLaps == 1 and '+1 LAP' or string.format('+%d LAPS', row.aheadLaps) end
+  return fmtGap(row.aheadS)
+end
+
+function script.windowTower(dt)
+  if field(sim, 'isMakingScreenshot') == true then return end   -- not on the photo
+  local rows = cls.rows
+  if #rows == 0 then
+    ui.textColored('No cars.', DIM)
+    return
+  end
+  local lineH = ui.textLineHeight()
+  local h = math.floor(lineH + 8)
+  local icon = h - 6
+  local width = ui.availableSpaceX()
+  local gapW = ui.measureText('+1 LAPS').x + 10
+  local focused = focusedCar()
+  for _, row in ipairs(rows) do
+    local p = ui.getCursor()
+    local level = row.level
+    if level then
+      ui.drawRectFilled(p, vec2(p.x + width, p.y + h), level.light)
+    elseif row.pos % 2 == 0 then
+      ui.drawRectFilled(p, vec2(p.x + width, p.y + h), TOWER_STRIPE)
+    end
+    local colour = level and DARK_TEXT or WHITE
+    local ty = p.y + (h - lineH) / 2
+    local meta = tower.meta[row.index] or {}
+
+    local posText = tostring(row.pos)
+    ui.setCursor(vec2(p.x + 26 - ui.measureText(posText).x, ty))
+    ui.textColored(posText, colour)
+
+    local ix = p.x + 32
+    if meta.image then
+      pcall(ui.drawImage, meta.image, vec2(ix, p.y + 3), vec2(ix + icon, p.y + 3 + icon))
+    end
+
+    local nx = ix + icon + 6
+    local label = settings.towerInitials and (meta.initials or row.name) or row.name
+    ui.pushClipRect(vec2(nx, p.y), vec2(p.x + width - gapW, p.y + h))
+    ui.setCursor(vec2(nx, ty))
+    ui.textColored(label, colour)
+    ui.popClipRect()
+
+    local gap = towerGap(row)
+    ui.setCursor(vec2(p.x + width - ui.measureText(gap).x - 6, ty))
+    ui.textColored(gap, row.pos == 1 and (level and DARK_TEXT or DIM) or colour)
+
+    ui.setCursor(p)
+    if ui.invisibleButton('##tower' .. row.index, vec2(width, h)) then focusCar(row.index) end
+    if ui.itemHovered() then
+      ui.drawRect(p, vec2(p.x + width, p.y + h), WHITE)
+      ui.setTooltip(row.name .. '\nClick: follow this car. Right click: names or initials.')
+    end
+    ui.itemPopup(ui.MouseButton and ui.MouseButton.Right or 1, function()
+      if ui.menuItem('Full names', not settings.towerInitials) then setSetting('towerInitials', false) end
+      if ui.menuItem('Initials', settings.towerInitials) then setSetting('towerInitials', true) end
+    end)
+    if row.index == focused then
+      ui.drawRect(p, vec2(p.x + width, p.y + h), level and level.strong or WHITE, 0, nil, 2)
     end
   end
 end
