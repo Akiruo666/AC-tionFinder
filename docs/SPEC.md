@@ -453,3 +453,24 @@ as the *On track* classification. Decisions with the user:
   `ac.setWindowOpen('tower', false)`, then opened again (window ID to be confirmed in the game);
 - never shows "finished" from the lap count alone (the mistake of the old BCast Python app,
   which froze the order once a car's lap count passed the race laps).
+
+### 11.3 Tower feedback (version 0.5)
+
+After the first test in the game:
+- the right-click menu was opened once per row; now one menu for the whole tower
+  (`ui.windowHovered` + right click → `ui.openPopup`), with full names / initials, the header and
+  extra columns (gap to the leader, distance to the car ahead, lap, last lap, best lap, speed,
+  car number), all kept with `ac.storage`;
+- **teleport to the pits**: the pit box is often just before the line, so laps + spline put the
+  car on top. A teleport (`ac.onCarJumped`, or more than 80 m between two updates of 0.1 s)
+  keeps the car's last progress on the track until it is out of the pits and faster than
+  30 km/h; it is shown as PIT. In the replay file a lap now only changes on a real crossing of
+  the line (spline > 0.8 → < 0.2), not on a jump of more than half a lap. What happens after
+  the car leaves the pits follows the game's lap count (whether AC credits the lap of a car
+  that teleported is not known yet);
+- the leader row is bright blue (`#1e88e5`);
+- header: `LAP n/total` (total from `ac.getSession(i).laps` live in a race by laps), `LAP n` in
+  replays, the session name in practice/qualifying; the race time: in replays from the moment
+  the field starts moving (`replayfile.findStart`, same rule as battles.py: 14.7 s on the test
+  replay, like the Windows program), live `sim.currentSessionTime` or the time left
+  (`sim.sessionTimeLeft`) in timed sessions.

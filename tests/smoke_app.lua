@@ -39,7 +39,12 @@ ac = {
   end,
   getCarID = function(i) return 'dw_gillet_vertigo' end,
   getCarSkinID = function(i) return 'skin' .. i end,
-  storage = function(layout) return layout end,
+  storage = function(layout)
+    for k in pairs(layout) do if k:match('^tower') then layout[k] = true end end   -- all tower columns on
+    return layout
+  end,
+  getSession = function(i) return { laps = 15, isTimedRace = false, startTime = 0 } end,
+  getDriverNumber = function(i) return i + 1 end,
   isWindowOpen = function(id) return true end,
   setWindowOpen = function(id, open) calls[#calls + 1] = (open and 'open ' or 'close ') .. id end,
   getPatchVersion = function() return '0.2.x' end,

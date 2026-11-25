@@ -83,18 +83,34 @@ local settings = {
   feet = false,      -- distances in feet instead of metres
   view = 'track',    -- 'track': order on the track with gaps; 'times': ordered by best lap
   towerInitials = false,  -- tower: initials instead of full names
+  -- tower: header and extra columns (right click on the tower)
+  towerHeader = true,
+  towerLeaderGap = false,
+  towerDistance = false,
+  towerLap = false,
+  towerLastLap = false,
+  towerBestLap = false,
+  towerSpeed = false,
+  towerNumber = false,
 }
+
+local STORED_KEYS = { 'feet', 'towerInitials', 'towerHeader', 'towerLeaderGap', 'towerDistance', 'towerLap',
+  'towerLastLap', 'towerBestLap', 'towerSpeed', 'towerNumber' }
 
 -- Settings kept between sessions (Documents\Assetto Corsa\cfg\extension\state\lua).
 local stored = nil
 do
-  local ok, s = pcall(ac.storage, { feet = false, towerInitials = false })
+  local layout = {}
+  for _, key in ipairs(STORED_KEYS) do layout[key] = settings[key] end
+  local ok, s = pcall(ac.storage, layout)
   if ok and s ~= nil then
     stored = s
-    pcall(function()
-      settings.feet = stored.feet == true
-      settings.towerInitials = stored.towerInitials == true
-    end)
+    for _, key in ipairs(STORED_KEYS) do
+      pcall(function()
+        local v = stored[key]
+        if type(v) == 'boolean' then settings[key] = v end
+      end)
+    end
   end
 end
 
@@ -214,13 +230,32 @@ end
 local tracking = {}        -- car index -> { laps = own lap counter, spline = last spline }
 local lastTrackFrame = nil
 
+-- A car that teleports (back to the pits, a reset) lands somewhere else on the lap,
+-- often just before the line, and would jump to the top. Until it is out of the pits
+-- and driving again, it keeps the progress it had on the track (`pitHold`).
+local lastOnTrack = {}     -- car index -> progress at the last update on the track
+local pitHold = {}         -- car index -> progress kept while back in the pits
+local lastPos = {}         -- car index -> { x, y, z } at the last update
+local TELEPORT_M = 80      -- more than this between two updates (0.1 s) is a teleport
+
 local function resetTracking()
   tracking = {}
   lastTrackFrame = nil
+  lastOnTrack, pitHold, lastPos = {}, {}, {}
+end
+
+local function markTeleport(index)
+  if pitHold[index] == nil and lastOnTrack[index] ~= nil then pitHold[index] = lastOnTrack[index] end
 end
 
 local function resetCar(index)
   if type(index) == 'number' then tracking[index] = nil end
+end
+
+local function carTeleported(index)
+  if type(index) ~= 'number' then return end
+  markTeleport(index)
+  tracking[index] = nil
 end
 
 -- Events that make the counted laps invalid. Every call is guarded: older CSP versions
@@ -235,9 +270,13 @@ listen('onReplay', function(event)
   if event == 'jump' or event == 'start' or event == 'stop' then resetTracking() end
 end)
 listen('onSessionStart', function() resetTracking() end)
-listen('onCarJumped', -1, resetCar)
-listen('onClientConnected', resetCar)
-listen('onClientDisconnected', resetCar)
+listen('onCarJumped', -1, carTeleported)
+local function newDriver(index)
+  if type(index) ~= 'number' then return end
+  tracking[index], lastOnTrack[index], pitHold[index], lastPos[index] = nil, nil, nil, nil
+end
+listen('onClientConnected', newDriver)
+listen('onClientDisconnected', newDriver)
 
 -- Session change without the event (older CSP): watch the session index and type.
 local session = { index = nil, kind = nil, changes = 0 }
@@ -341,12 +380,35 @@ local function updateClassification()
     if ok and car and field(car, 'isActive') ~= false then
       local best = field(car, 'bestLapTimeMs') or 0
       local prev = field(car, 'previousLapTimeMs') or 0
+      local progress = carProgress(car, i, lengthM)
+      local speedKmh = field(car, 'speedKmh') or 0
+      local pitField = field(car, 'isInPitlane')
+      local inPit = pitField == true or field(car, 'isInPit') == true
+
+      -- teleport seen from the position (also in replays, where the event may not come)
+      local pos = field(car, 'position')
+      if pos then
+        local lp = lastPos[i]
+        if lp then
+          local dx, dy, dz = pos.x - lp.x, pos.y - lp.y, pos.z - lp.z
+          if dx * dx + dy * dy + dz * dz > TELEPORT_M * TELEPORT_M then markTeleport(i) end
+        end
+        lastPos[i] = { x = pos.x, y = pos.y, z = pos.z }
+      end
+      -- keep the progress from before the teleport until the car is out of the pits
+      local hold = pitHold[i]
+      if hold ~= nil and not inPit and speedKmh > 30 then
+        pitHold[i], hold = nil, nil
+      end
+      if hold ~= nil and progress > hold then progress = hold end
+      if hold == nil and not inPit then lastOnTrack[i] = progress end
+
       local row = {
         index = i,
         name = driverName(i),
-        progress = carProgress(car, i, lengthM),
-        speedKmh = field(car, 'speedKmh') or 0,
-        pit = field(car, 'isInPitlane') == true,
+        progress = progress,
+        speedKmh = speedKmh,
+        pit = inPit or hold ~= nil,
         refLapMs = (best > 0 and best) or (prev > 0 and prev) or nil,
         bestMs = best > 0 and best or nil,
         lastMs = prev > 0 and prev or nil,
@@ -560,6 +622,9 @@ local function startLapJob(info, positions)
   local lengthM = field(sim, 'trackLengthM') or 0
   local count = positions.count
   lapData.step, lapData.count = positions.step, count
+  -- the moment the field starts moving, for the race time in the tower
+  local okStart, startSample = pcall(ReplayFile.findStart, positions, positions.step * info.intervalMs / 1000, 15)
+  lapData.startFrame = okStart and startSample and startSample * positions.step or nil
   lapData.state, lapData.percent, lapData.progress = 'computing', 0, {}
   local cars = {}
   for index, c in pairs(positions.cars) do cars[#cars + 1] = { index = index, pos = c } end
@@ -620,7 +685,7 @@ local function readReplay()
   end
   local path = rf.path
   rf.info, rf.loading = nil, true
-  lapData.state, lapData.percent, lapData.message, lapData.progress = 'reading', 0, nil, {}
+  lapData.state, lapData.percent, lapData.message, lapData.progress, lapData.startFrame = 'reading', 0, nil, {}, nil
   rf.status, rf.statusGood = 'Reading ' .. fileName(path) .. ' ...', nil
   local t0 = clock()
   local function done(err, data)
@@ -719,6 +784,7 @@ local function refreshTowerMeta()
     local m = tower.meta[i] or {}
     m.name = drivers[i]
     m.initials = initials[i] or drivers[i]
+    m.number = safeCall(ac.getDriverNumber, i)
     local key = tostring(safeCall(ac.getCarID, i)) .. '/' .. tostring(safeCall(ac.getCarSkinID, i))
     if m.skinKey ~= key then m.image, m.skinKey = liveryImage(i) end
     tower.meta[i] = m
@@ -1113,36 +1179,144 @@ end
 -------------------------------------------------------------------------------- tower window
 
 local TOWER_STRIPE = rgbm(1, 1, 1, 0.04)
+local TOWER_HEADER_BG = rgbm(0, 0, 0, 0.45)
+local LEADER_BG = hex('#1e88e5')          -- the leader stands out in bright blue
+
+local function fmtLapsUpper(n)
+  return n == 1 and '+1 LAP' or string.format('+%d LAPS', n)
+end
+
+-- 1:02:03 or 12:34
+local function fmtClock(seconds)
+  seconds = math.max(0, math.floor(seconds))
+  local h, m, sec = math.floor(seconds / 3600), math.floor(seconds / 60) % 60, seconds % 60
+  if h > 0 then return string.format('%d:%02d:%02d', h, m, sec) end
+  return string.format('%d:%02d', m, sec)
+end
 
 local function towerGap(row)
   if row.pos == 1 then return 'Leader' end
   if row.pit then return 'PIT' end
-  if row.aheadLaps then return row.aheadLaps == 1 and '+1 LAP' or string.format('+%d LAPS', row.aheadLaps) end
+  if row.aheadLaps then return fmtLapsUpper(row.aheadLaps) end
   return fmtGap(row.aheadS)
+end
+
+-- Extra columns, chosen with a right click on the tower (right of the interval).
+local TOWER_EXTRAS = {
+  { key = 'towerLeaderGap', label = 'Gap to the leader', sample = '+1:02.3', text = function(row)
+    if row.pos == 1 then return '' end
+    if row.leaderLaps then return fmtLapsUpper(row.leaderLaps) end
+    return fmtGap(row.leaderS)
+  end },
+  { key = 'towerDistance', label = 'Distance to the car ahead', sample = '9999 ft', text = function(row)
+    if row.pos == 1 or row.aheadLaps then return '' end
+    return fmtDist(row.aheadM)
+  end },
+  { key = 'towerLap', label = 'Lap', sample = 'L99', text = function(row) return 'L' .. row.lap end },
+  { key = 'towerLastLap', label = 'Last lap', sample = '1:23.456', text = function(row) return fmtLapTime(row.lastMs) end },
+  { key = 'towerBestLap', label = 'Best lap', sample = '1:23.456', text = function(row) return fmtLapTime(row.bestMs) end },
+  { key = 'towerSpeed', label = 'Speed', sample = '999 km/h', text = function(row)
+    if settings.feet then return string.format('%.0f mph', row.speedKmh / 1.609344) end
+    return string.format('%.0f km/h', row.speedKmh)
+  end },
+  { key = 'towerNumber', label = 'Car number', sample = '#999', text = function(row, meta)
+    return (type(meta.number) == 'number' and meta.number > 0) and ('#' .. meta.number) or ''
+  end },
+}
+
+-- Header: lap of the leader (of the total when known) and the race time.
+local function towerHeader(rows)
+  local s = safeCall(ac.getSession, session.index or field(sim, 'currentSessionIndex') or 0)
+  local live = not replayActive()
+  local timed = live and s ~= nil and field(s, 'isTimedRace') == true
+  local left, right
+  if live and not isRaceSession() then
+    left = sessionName():upper()
+  elseif rows[1] then
+    local total = (live and s ~= nil and not timed) and (field(s, 'laps') or 0) or 0
+    left = total > 0 and string.format('LAP %d/%d', math.min(rows[1].lap, total), total)
+      or string.format('LAP %d', rows[1].lap)
+  end
+  if not live then
+    local f, ms = field(sim, 'replayCurrentFrame'), frameMs()
+    if lapData.startFrame and type(f) == 'number' and ms then
+      local t = (f - lapData.startFrame) * ms / 1000
+      right = t < 0 and 'START' or fmtClock(t)
+    end
+  else
+    local remaining = field(sim, 'sessionTimeLeft')
+    if (timed or not isRaceSession()) and type(remaining) == 'number' and remaining > 0 then
+      right = fmtClock(remaining / 1000) .. ' left'
+    else
+      local t = field(sim, 'currentSessionTime')
+      if type(t) == 'number' and t ~= 0 then
+        right = fmtClock(t / 1000)
+      elseif s ~= nil then
+        local start, now = field(s, 'startTime'), field(sim, 'time')
+        if type(start) == 'number' and type(now) == 'number' and start > 0 then right = fmtClock((now - start) / 1000) end
+      end
+    end
+  end
+  return left, right
+end
+
+local function towerMenu()
+  local keep = ui.SelectableFlags and ui.SelectableFlags.DontClosePopups or nil
+  ui.textColored('Names', DIM)
+  if ui.menuItem('Full names', not settings.towerInitials, keep) then setSetting('towerInitials', false) end
+  if ui.menuItem('Initials', settings.towerInitials, keep) then setSetting('towerInitials', true) end
+  ui.separator()
+  ui.textColored('Show', DIM)
+  if ui.menuItem('Lap and race time', settings.towerHeader, keep) then setSetting('towerHeader', not settings.towerHeader) end
+  for _, e in ipairs(TOWER_EXTRAS) do
+    if ui.menuItem(e.label, settings[e.key], keep) then setSetting(e.key, not settings[e.key]) end
+  end
 end
 
 function script.windowTower(dt)
   if field(sim, 'isMakingScreenshot') == true then return end   -- not on the photo
   local rows = cls.rows
-  if #rows == 0 then
-    ui.textColored('No cars.', DIM)
-    return
-  end
   local lineH = ui.textLineHeight()
   local h = math.floor(lineH + 8)
   local icon = h - 6
   local width = ui.availableSpaceX()
   local gapW = ui.measureText('+1 LAPS').x + 10
   local focused = focusedCar()
+
+  -- extra columns, right to left from the window edge
+  local extras, extrasW = {}, 0
+  for _, e in ipairs(TOWER_EXTRAS) do
+    if settings[e.key] then
+      local w = ui.measureText(e.sample).x + 12
+      extras[#extras + 1] = { def = e, w = w }
+      extrasW = extrasW + w
+    end
+  end
+  local gapRight = width - extrasW            -- right edge of the interval column
+
+  if settings.towerHeader then
+    local p = ui.getCursor()
+    ui.drawRectFilled(p, vec2(p.x + width, p.y + h), TOWER_HEADER_BG)
+    local left, right = towerHeader(rows)
+    local ty = p.y + (h - lineH) / 2
+    if left then ui.setCursor(vec2(p.x + 6, ty)); ui.textColored(left, WHITE) end
+    if right then ui.setCursor(vec2(p.x + width - ui.measureText(right).x - 6, ty)); ui.textColored(right, WHITE) end
+    ui.setCursor(vec2(p.x, p.y + h + 2))
+  end
+
+  if #rows == 0 then ui.textColored('No cars.', DIM) end
   for _, row in ipairs(rows) do
     local p = ui.getCursor()
     local level = row.level
-    if level then
+    local leader = row.pos == 1
+    if leader then
+      ui.drawRectFilled(p, vec2(p.x + width, p.y + h), LEADER_BG)
+    elseif level then
       ui.drawRectFilled(p, vec2(p.x + width, p.y + h), level.light)
     elseif row.pos % 2 == 0 then
       ui.drawRectFilled(p, vec2(p.x + width, p.y + h), TOWER_STRIPE)
     end
-    local colour = level and DARK_TEXT or WHITE
+    local colour = (level and not leader) and DARK_TEXT or WHITE
     local ty = p.y + (h - lineH) / 2
     local meta = tower.meta[row.index] or {}
 
@@ -1157,28 +1331,43 @@ function script.windowTower(dt)
 
     local nx = ix + icon + 6
     local label = settings.towerInitials and (meta.initials or row.name) or row.name
-    ui.pushClipRect(vec2(nx, p.y), vec2(p.x + width - gapW, p.y + h))
+    ui.pushClipRect(vec2(nx, p.y), vec2(p.x + gapRight - gapW, p.y + h))
     ui.setCursor(vec2(nx, ty))
     ui.textColored(label, colour)
     ui.popClipRect()
 
     local gap = towerGap(row)
-    ui.setCursor(vec2(p.x + width - ui.measureText(gap).x - 6, ty))
-    ui.textColored(gap, row.pos == 1 and (level and DARK_TEXT or DIM) or colour)
+    ui.setCursor(vec2(p.x + gapRight - ui.measureText(gap).x - 6, ty))
+    ui.textColored(gap, colour)
+
+    local x = p.x + gapRight
+    for _, c in ipairs(extras) do
+      local text = c.def.text(row, meta)
+      x = x + c.w
+      if text ~= '' then
+        ui.setCursor(vec2(x - ui.measureText(text).x - 6, ty))
+        ui.textColored(text, colour)
+      end
+    end
 
     ui.setCursor(p)
     if ui.invisibleButton('##tower' .. row.index, vec2(width, h)) then focusCar(row.index) end
     if ui.itemHovered() then
       ui.drawRect(p, vec2(p.x + width, p.y + h), WHITE)
-      ui.setTooltip(row.name .. '\nClick: follow this car. Right click: names or initials.')
+      ui.setTooltip(row.name .. '\nClick: follow this car. Right click: what the tower shows.')
     end
-    ui.itemPopup(ui.MouseButton and ui.MouseButton.Right or 1, function()
-      if ui.menuItem('Full names', not settings.towerInitials) then setSetting('towerInitials', false) end
-      if ui.menuItem('Initials', settings.towerInitials) then setSetting('towerInitials', true) end
-    end)
     if row.index == focused then
-      ui.drawRect(p, vec2(p.x + width, p.y + h), level and level.strong or WHITE, 0, nil, 2)
+      ui.drawRect(p, vec2(p.x + width, p.y + h), (level and not leader) and level.strong or WHITE, 0, nil, 2)
     end
+  end
+
+  -- one menu for the whole tower
+  if ui.windowHovered() and ui.mouseClicked(ui.MouseButton and ui.MouseButton.Right or 1) then
+    ui.openPopup('##towerMenu')
+  end
+  if ui.beginPopup('##towerMenu') then
+    towerMenu()
+    ui.endPopup()
   end
 end
 

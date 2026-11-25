@@ -159,8 +159,9 @@ end
 
 -- Turns the track progress (0..1 along the AI line, -1 = unknown) of the samples of one
 -- car into progress over the whole race: laps + fraction, written into `out` (a double
--- array). A jump of more than half a lap between two known samples is a crossing of the
--- line. A car that starts within `gridM` metres before the line is on the grid
+-- array). Only a real crossing of the line changes the lap: from above 0.8 to below 0.2
+-- (or back when reversing). A teleport (to the pits, a reset) jumps elsewhere on the lap
+-- and does not count. A car that starts within `gridM` metres before the line is on the grid
 -- (progress just below 0). Unknown samples get the last known value; `known` (uint8
 -- array, may be nil) gets 1 for known samples.
 function M.unwrapProgress(raw, count, out, known, lengthM, gridM)
@@ -173,8 +174,8 @@ function M.unwrapProgress(raw, count, out, known, lengthM, gridM)
       if prev == nil then
         if p > 1 - gridFraction then laps = -1 end
       else
-        local d = p - prev
-        if d < -0.5 then laps = laps + 1 elseif d > 0.5 then laps = laps - 1 end
+        if prev > 0.8 and p < 0.2 then laps = laps + 1
+        elseif prev < 0.2 and p > 0.8 then laps = laps - 1 end
       end
       prev = p
       last = laps + p
@@ -184,6 +185,27 @@ function M.unwrapProgress(raw, count, out, known, lengthM, gridM)
     end
     out[k] = last
   end
+end
+
+-- Sample at which the field starts moving (SPEC 8.2, same rule as battles.py: the first
+-- sample where any car drives at least `minKmh`). `sampleS` is the time between two
+-- samples. Returns nil when no car ever moves.
+function M.findStart(positions, sampleS, minKmh)
+  local limit = (minKmh or 15) / 3.6 * sampleS
+  limit = limit * limit
+  for k = 1, positions.count - 1 do
+    for _, c in pairs(positions.cars) do
+      local x0, z0 = c.x[k - 1], c.z[k - 1]
+      local x1, z1 = c.x[k], c.z[k]
+      if (x0 ~= 0 or z0 ~= 0) and (x1 ~= 0 or z1 ~= 0) then
+        local dx, dy, dz = x1 - x0, c.y[k] - c.y[k - 1], z1 - z0
+        local d = dx * dx + dy * dy + dz * dz
+        -- moving, but not a teleport (> 15 m between two samples)
+        if d >= limit and d < 225 then return k end
+      end
+    end
+  end
+  return nil
 end
 
 -- Reads the header and car list of a replay held in a Lua string.
