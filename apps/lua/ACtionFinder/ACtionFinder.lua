@@ -1221,7 +1221,7 @@ end
 -- The interval: the time to the car ahead first; when the time cannot be estimated,
 -- the distance; PIT or '-' only when neither is known.
 local function towerGap(row)
-  if row.pos == 1 then return 'Leader' end
+  if row.pos == 1 then return '' end           -- the blue row shows the leader
   if row.aheadLaps then return fmtLapsUpper(row.aheadLaps) end
   if row.aheadS then return fmtGap(row.aheadS) end
   if row.aheadM and not row.pit then return fmtDist(row.aheadM) end
@@ -1230,23 +1230,23 @@ end
 
 -- Extra columns, chosen with a right click on the tower (right of the interval).
 local TOWER_EXTRAS = {
-  { key = 'towerLeaderGap', label = 'Gap to the leader', sample = '+1:02.3', text = function(row)
+  { key = 'towerLeaderGap', title = 'To leader', label = 'Gap to the leader', sample = '+1:02.3', text = function(row)
     if row.pos == 1 then return '' end
     if row.leaderLaps then return fmtLapsUpper(row.leaderLaps) end
     return fmtGap(row.leaderS)
   end },
-  { key = 'towerDistance', label = 'Distance to the car ahead', sample = '9999 ft', text = function(row)
+  { key = 'towerDistance', title = 'Distance', label = 'Distance to the car ahead', sample = '9999 ft', text = function(row)
     if row.pos == 1 or row.aheadLaps then return '' end
     return fmtDist(row.aheadM)
   end },
-  { key = 'towerLap', label = 'Lap', sample = 'L99', text = function(row) return 'L' .. row.lap end },
-  { key = 'towerLastLap', label = 'Last lap', sample = '1:23.456', text = function(row) return fmtLapTime(row.lastMs) end },
-  { key = 'towerBestLap', label = 'Best lap', sample = '1:23.456', text = function(row) return fmtLapTime(row.bestMs) end },
-  { key = 'towerSpeed', label = 'Speed', sample = '999 km/h', text = function(row)
+  { key = 'towerLap', title = 'Lap', label = 'Lap', sample = 'L99', text = function(row) return 'L' .. row.lap end },
+  { key = 'towerLastLap', title = 'Last lap', label = 'Last lap', sample = '1:23.456', text = function(row) return fmtLapTime(row.lastMs) end },
+  { key = 'towerBestLap', title = 'Best lap', label = 'Best lap', sample = '1:23.456', text = function(row) return fmtLapTime(row.bestMs) end },
+  { key = 'towerSpeed', title = 'Speed', label = 'Speed', sample = '999 km/h', text = function(row)
     if settings.feet then return string.format('%.0f mph', row.speedKmh / 1.609344) end
     return string.format('%.0f km/h', row.speedKmh)
   end },
-  { key = 'towerNumber', label = 'Car number', sample = '#999', text = function(row, meta)
+  { key = 'towerNumber', title = 'No.', label = 'Car number', sample = '#999', text = function(row, meta)
     return (type(meta.number) == 'number' and meta.number > 0) and ('#' .. meta.number) or ''
   end },
 }
@@ -1307,7 +1307,7 @@ function script.windowTower(dt)
   local h = math.floor(lineH + 8)
   local icon = h - 6
   local width = ui.availableSpaceX()
-  local gapW = ui.measureText('+1 LAPS').x + 10
+  local gapW = math.max(ui.measureText('+1 LAPS').x, ui.measureText('Interval').x) + 10
   local focused = focusedCar()
 
   -- extra columns, right to left from the window edge
@@ -1316,7 +1316,7 @@ function script.windowTower(dt)
   local fixedW = 32 + icon + 6 + ui.measureText('WWWWW').x + gapW
   for _, e in ipairs(TOWER_EXTRAS) do
     if settings[e.key] then
-      local w = ui.measureText(e.sample).x + 12
+      local w = math.max(ui.measureText(e.sample).x, ui.measureText(e.title).x) + 12
       if fixedW + extrasW + w <= width then
         extras[#extras + 1] = { def = e, w = w }
         extrasW = extrasW + w
@@ -1333,6 +1333,22 @@ function script.windowTower(dt)
     if left then ui.setCursor(vec2(p.x + 6, ty)); ui.textColored(left, WHITE) end
     if right then ui.setCursor(vec2(p.x + width - ui.measureText(right).x - 6, ty)); ui.textColored(right, WHITE) end
     ui.setCursor(vec2(p.x, p.y + h + 2))
+  end
+
+  -- column titles, as soon as there is more than one number per row
+  if #extras > 0 then
+    local p = ui.getCursor()
+    local function title(text, right)
+      ui.setCursor(vec2(right - ui.measureText(text).x - 6, p.y))
+      ui.textColored(text, DIM)
+    end
+    title('Interval', p.x + gapRight)
+    local x = p.x + gapRight
+    for _, c in ipairs(extras) do
+      x = x + c.w
+      title(c.def.title, x)
+    end
+    ui.setCursor(vec2(p.x, p.y + lineH + 2))
   end
 
   if #rows == 0 then ui.textColored('No cars.', DIM) end

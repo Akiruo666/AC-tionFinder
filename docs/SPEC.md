@@ -487,3 +487,11 @@ Three things could hide it:
   no time can be estimated it falls back to the distance, then PIT or `-`;
 - extra columns could push the interval out of a narrow tower: extra columns are only drawn
   when they fit next to the interval and a short name.
+
+### 11.5 Tower column titles (version 0.7)
+
+In the test the leader row said `Leader` in the interval column; with *Gap to the leader* on, the
+interval column looked like the gap to the leader. Now the leader row is empty in that column
+(the blue row shows the leader), and as soon as an extra column is on, a line with column titles
+(`Interval`, `To leader`, `Distance`, `Lap`, `Last lap`, `Best lap`, `Speed`, `No.`) is drawn
+under the header.
