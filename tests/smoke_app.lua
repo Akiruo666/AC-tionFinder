@@ -37,12 +37,17 @@ ac = {
   worldCoordinateToTrackProgress = function(v)
     return (math.atan2(v.z - CENTRE_Z, v.x - CENTRE_X) / (2 * math.pi)) % 1
   end,
+  getCarID = function(i) return 'dw_gillet_vertigo' end,
+  getCarSkinID = function(i) return 'skin' .. i end,
+  storage = function(layout) return layout end,
+  isWindowOpen = function(id) return true end,
+  setWindowOpen = function(id, open) calls[#calls + 1] = (open and 'open ' or 'close ') .. id end,
   getPatchVersion = function() return '0.2.x' end,
   getPatchVersionCode = function() return 3000 end,
   getReplayFilename = function() return nil end,
   onReplay = function(cb) end,
   getFolder = function(id) return '/fake/' .. tostring(id) end,
-  FolderID = { Replays = 'replay', Cfg = 'cfg' },
+  FolderID = { Replays = 'replay', Cfg = 'cfg', ContentCars = 'cars' },
   INIConfig = { load = function(p)
     return { get = function(self, s, k, d) if k == 'FILENAME' then return { replayPath } end return { '1' } end }
   end },
@@ -59,6 +64,9 @@ local clickRow = nil
 local function noop() end
 ui = setmetatable({
   getCursor = function() return vec2(10, 20) end,
+  measureText = function(t) return vec2(#t * 7, 14) end,
+  textLineHeight = function() return 14 end,
+  MouseButton = { Right = 1 },
   availableSpaceX = function() return 600 end,
   availableSpaceY = function() return 300 end,
   textLineHeightWithSpacing = function() return 18 end,
@@ -88,8 +96,10 @@ for step = 1, 80 do
   sim.replayCurrentFrame = sim.replayCurrentFrame + 3
   clickRow = step == 10 and '##row4' or nil
   local t = os.clock(); while os.clock() - t < 0.105 do end   -- let the classification update
+  sim.isMakingScreenshot = (step == 30 or step == 31)
   script.update(0.1)
   script.windowMain(0.1)
+  script.windowTower(0.1)
 end
 -- print the classification (found through the upvalues of script.update)
 local function upvalue(fn, name)

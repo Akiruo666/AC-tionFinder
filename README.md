@@ -26,6 +26,10 @@ open *AC-tionFinder* from the app bar on the right.
 
   Click a row (for example the name) to follow that car. The lap count is reset on a new
   session, a car teleport (back to the pits) and a driver connecting or disconnecting.
+- **Tower** (separate window *AC-tionFinder Tower* in the app bar): a minimal classification like
+  on TV: position, the skin's livery icon, the name (full name or initials, right click to switch)
+  and the gap to the car ahead, coloured when cars are close. Click a row to follow that car. It
+  hides itself while CSP makes a screenshot (photo mode).
 - **Jump test**: jumps in the replay with `ac.setReplayPosition` (buttons, slider) and keeps
   following the same car, or jumps back 10 s and follows another car. It shows whether the jump worked.
 - **Replay file**: finds the replay that plays (`ac.getReplayFilename()`, else `cfg/race.ini`),
@@ -40,6 +44,7 @@ luajit tests/test_replayfile.lua <file.acreplay>
 python3 tests/compare_python.py <OvertakeFinder checkout> <file.acreplay>
 luajit tests/smoke_app.lua <file.acreplay>
 luajit tests/live_sessions.lua
+luajit tests/test_names.lua
 ```
 
 The first two print the same car list (Lua reader against the Python reader of AC Overtake

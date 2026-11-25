@@ -436,3 +436,20 @@ the pits, left a different error per car. Now:
   `ac.onCarJumped(-1, …)`, `ac.onClientConnected` and `ac.onClientDisconnected`.
 - two views with a switch, default *On track* (order on the track, gaps in time and distance);
   *Lap times* orders by `car.bestLapTimeMs` (practice / qualifying classification).
+
+### 11.2 Tower (version 0.4)
+
+A second window (`[WINDOW_...] ID = tower`, `FUNCTION_MAIN = windowTower`) with only position,
+livery icon, name and the gap to the car ahead (`+0.42`, `+1 LAP`, `PIT`), same data and colours
+as the *On track* classification. Decisions with the user:
+- the icon is the skin's `content/cars/<car>/skins/<skin>/livery.png`; when that file is missing,
+  CSP's `carN::special::livery`;
+- names: full name or initials (`src/names.lua`): first letter of every word, particles
+  included (*Pieter van den Broek* → `PVDB`), one word → first three letters (`GRI`), only the
+  first driver of a shared car, camel case splits (`YoungsterBen` → `YB`); equal initials get a
+  number in car index order (`PS`, `PS2`), so a label stays with its car;
+- both windows can be open; they are opened from the app bar (no switch button or hotkey);
+- not on the photo: while `sim.isMakingScreenshot` the tower draws nothing and is closed with
+  `ac.setWindowOpen('tower', false)`, then opened again (window ID to be confirmed in the game);
+- never shows "finished" from the lap count alone (the mistake of the old BCast Python app,
+  which froze the order once a car's lap count passed the race laps).
