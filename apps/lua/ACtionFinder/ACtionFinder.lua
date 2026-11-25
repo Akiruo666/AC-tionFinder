@@ -350,14 +350,34 @@ local function carProgress(car, index, lengthM)
 end
 
 -- Estimated time for the car behind to cover `dp` laps of progress.
-local function estimateSeconds(dp, row, lengthM)
+-- Estimated time for the car behind to cover `dp` laps of progress: distance / speed of
+-- the car behind; when that car is (nearly) stopped, the speed of the car ahead.
+local function estimateSeconds(dp, row, lengthM, aheadRow)
   if lengthM <= 0 then return nil end
   local metres = dp * lengthM
   if metres < 400 or not row.refLapMs then
-    if row.speedKmh < 15 then return nil end
-    return metres / (row.speedKmh / 3.6)
+    local v = row.speedKmh
+    if v < 15 and aheadRow and aheadRow.speedKmh >= 15 then v = aheadRow.speedKmh end
+    if v < 15 then return nil end
+    return metres / (v / 3.6)
   end
   return dp * row.refLapMs / 1000
+end
+
+-- Speed of a car at the current replay frame from the positions in the replay file
+-- (works while the replay is paused, when the game may report 0), or nil.
+local function fileSpeedKmh(index)
+  local pos = lapData.positions
+  if lapData.state ~= 'ready' or not pos or not replayActive() then return nil end
+  local c = pos.cars[index]
+  local frame = field(sim, 'replayCurrentFrame')
+  if not c or type(frame) ~= 'number' or pos.count < 2 or not lapData.sampleS then return nil end
+  local k = math.max(0, math.min(pos.count - 2, math.floor(frame / pos.step)))
+  if (c.x[k] == 0 and c.z[k] == 0) or (c.x[k + 1] == 0 and c.z[k + 1] == 0) then return nil end
+  local dx, dy, dz = c.x[k + 1] - c.x[k], c.y[k + 1] - c.y[k], c.z[k + 1] - c.z[k]
+  local d = math.sqrt(dx * dx + dy * dy + dz * dz)
+  if d > 15 then return nil end                     -- teleport
+  return d / lapData.sampleS * 3.6
 end
 
 local cls = { rows = {}, timeRows = {}, lengthM = 0, updated = -1 }
@@ -382,6 +402,7 @@ local function updateClassification()
       local prev = field(car, 'previousLapTimeMs') or 0
       local progress = carProgress(car, i, lengthM)
       local speedKmh = field(car, 'speedKmh') or 0
+      if speedKmh < 15 then speedKmh = fileSpeedKmh(i) or speedKmh end
       local pitField = field(car, 'isInPitlane')
       local inPit = pitField == true or field(car, 'isInPit') == true
 
@@ -433,13 +454,13 @@ local function updateClassification()
         row.aheadLaps = math.floor(dp)
       else
         row.aheadM = lengthM > 0 and dp * lengthM or nil
-        row.aheadS = estimateSeconds(dp, row, lengthM)
+        row.aheadS = estimateSeconds(dp, row, lengthM, ahead)
       end
       local dl = leader.progress - row.progress
       if dl >= 1 then
         row.leaderLaps = math.floor(dl)
       else
-        row.leaderS = estimateSeconds(dl, row, lengthM)
+        row.leaderS = estimateSeconds(dl, row, lengthM, leader)
       end
       row.level = (not row.aheadLaps) and gapLevel(row.aheadS, row.aheadM) or nil
     end
@@ -655,6 +676,8 @@ local function startLapJob(info, positions)
       lapData.progress[car.index] = prog
     end
     lapData.percent = 100
+    lapData.positions = positions                     -- kept for the speed (fileSpeedKmh)
+    lapData.sampleS = positions.step * info.intervalMs / 1000
     lapData.state = 'ready'
     lapData.message = string.format('Laps from the replay file (%d cars).', #cars)
   end)
@@ -686,6 +709,7 @@ local function readReplay()
   local path = rf.path
   rf.info, rf.loading = nil, true
   lapData.state, lapData.percent, lapData.message, lapData.progress, lapData.startFrame = 'reading', 0, nil, {}, nil
+  lapData.positions = nil
   rf.status, rf.statusGood = 'Reading ' .. fileName(path) .. ' ...', nil
   local t0 = clock()
   local function done(err, data)
@@ -1194,11 +1218,14 @@ local function fmtClock(seconds)
   return string.format('%d:%02d', m, sec)
 end
 
+-- The interval: the time to the car ahead first; when the time cannot be estimated,
+-- the distance; PIT or '-' only when neither is known.
 local function towerGap(row)
   if row.pos == 1 then return 'Leader' end
-  if row.pit then return 'PIT' end
   if row.aheadLaps then return fmtLapsUpper(row.aheadLaps) end
-  return fmtGap(row.aheadS)
+  if row.aheadS then return fmtGap(row.aheadS) end
+  if row.aheadM and not row.pit then return fmtDist(row.aheadM) end
+  return row.pit and 'PIT' or '-'
 end
 
 -- Extra columns, chosen with a right click on the tower (right of the interval).
@@ -1284,12 +1311,16 @@ function script.windowTower(dt)
   local focused = focusedCar()
 
   -- extra columns, right to left from the window edge
+  -- (only those that fit: the interval and at least a short name always come first)
   local extras, extrasW = {}, 0
+  local fixedW = 32 + icon + 6 + ui.measureText('WWWWW').x + gapW
   for _, e in ipairs(TOWER_EXTRAS) do
     if settings[e.key] then
       local w = ui.measureText(e.sample).x + 12
-      extras[#extras + 1] = { def = e, w = w }
-      extrasW = extrasW + w
+      if fixedW + extrasW + w <= width then
+        extras[#extras + 1] = { def = e, w = w }
+        extrasW = extrasW + w
+      end
     end
   end
   local gapRight = width - extrasW            -- right edge of the interval column
@@ -1331,12 +1362,20 @@ function script.windowTower(dt)
 
     local nx = ix + icon + 6
     local label = settings.towerInitials and (meta.initials or row.name) or row.name
-    ui.pushClipRect(vec2(nx, p.y), vec2(p.x + gapRight - gapW, p.y + h))
+    local gap = towerGap(row)
+    local nameEnd = p.x + gapRight - gapW
+    if row.pit and gap ~= 'PIT' then
+      -- small PIT tag between the name and the interval
+      local tagW = ui.measureText('PIT').x + 8
+      nameEnd = nameEnd - tagW
+      ui.setCursor(vec2(nameEnd + 4, ty))
+      ui.textColored('PIT', (level and not leader) and DARK_TEXT or DIM)
+    end
+    ui.pushClipRect(vec2(nx, p.y), vec2(nameEnd, p.y + h))
     ui.setCursor(vec2(nx, ty))
     ui.textColored(label, colour)
     ui.popClipRect()
 
-    local gap = towerGap(row)
     ui.setCursor(vec2(p.x + gapRight - ui.measureText(gap).x - 6, ty))
     ui.textColored(gap, colour)
 

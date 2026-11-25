@@ -474,3 +474,16 @@ After the first test in the game:
   the field starts moving (`replayfile.findStart`, same rule as battles.py: 14.7 s on the test
   replay, like the Windows program), live `sim.currentSessionTime` or the time left
   (`sim.sessionTimeLeft`) in timed sessions.
+
+### 11.4 The time gap to the car ahead comes first (version 0.6)
+
+The user missed the time gap (the most important number, to find photo moments in replays).
+Three things could hide it:
+- the time is distance / speed of the car behind, and was `-` below 15 km/h, e.g. when the game
+  reports speed 0 in a paused replay. Now: in replays the speed from the replay file positions
+  (`fileSpeedKmh`) when the game gives < 15 km/h, and the speed of the car ahead when the car
+  behind is (nearly) stopped;
+- the tower showed `PIT` instead of the gap: now the time stays, with a small PIT tag; only when
+  no time can be estimated it falls back to the distance, then PIT or `-`;
+- extra columns could push the interval out of a narrow tower: extra columns are only drawn
+  when they fit next to the interval and a short name.
