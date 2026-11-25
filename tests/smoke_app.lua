@@ -131,3 +131,16 @@ if lapData.state == 'ready' then
   end
 end
 
+
+-- Paused replay where the game reports speed 0: the time gap must still be there
+-- (speed from the positions in the replay file).
+for i = 0, 5 do cars[i].speedKmh = 0 end
+sim.replayCurrentFrame = 3000
+local t = os.clock(); while os.clock() - t < 0.105 do end
+script.update(0)
+local missing = 0
+for _, r in ipairs(cls.rows) do
+  if r.pos > 1 and not r.aheadLaps and r.aheadS == nil then missing = missing + 1 end
+end
+print(string.format('paused replay, speed 0 from the game: %d of %d gaps missing, speed from the file %.0f km/h: %s',
+  missing, #cls.rows - 1, cls.rows[2].speedKmh, missing == 0 and 'OK' or 'WRONG'))
