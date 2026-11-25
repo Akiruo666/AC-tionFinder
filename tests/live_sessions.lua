@@ -56,8 +56,10 @@ local cls = upvalue(script.update, 'cls')
 
 -- Moves every car; the game's lap count follows `lag` updates after the line.
 local pendingLap = {}
+local frozen = {}          -- cars that stand still in the pits (their spline is set by the test)
 local function drive(speeds, lag, useEvent)
   for i = 0, N - 1 do
+   if not frozen[i] then
     truth[i] = truth[i] + speeds[i]
     local p = truth[i]
     cars[i].splinePosition = p % 1
@@ -67,6 +69,7 @@ local function drive(speeds, lag, useEvent)
       if pendingLap[i] > lag then cars[i].lapCount, pendingLap[i] = completed, 0 end
     end
     cars[i].distanceDrivenSessionKm = math.max(0, p + 0.03) * 3.7
+   end
   end
   now = now + 0.1
   script.update(0.1)
@@ -116,5 +119,21 @@ for _ = 1, 3000 do drive(speeds, 3) end
 check('race, 5 minutes (lap count 0.3 s late)')
 for _ = 1, 6000 do drive(speeds, 3) end
 check('race, 15 minutes')
+
+-- A car in the middle of the field is sent back to the pits: its pit box is just
+-- before the line (spline 0.97), so laps + spline would put it on top.
+local function rowOf(index)
+  for _, r in ipairs(cls.rows) do if r.index == index then return r end end
+end
+local before = rowOf(6).pos
+frozen[6] = true
+cars[6].splinePosition, cars[6].isInPitlane, cars[6].speedKmh = 0.97, true, 0
+callbacks.jumped(6)
+for _ = 1, 100 do drive(speeds, 3) end
+local after = rowOf(6)
+local ok = after.pos >= before and after.pit
+print(string.format('%-45s position %d -> %d, PIT %s: %s', 'race, car 6 teleported to the pits', before, after.pos,
+  tostring(after.pit), ok and 'OK' or 'WRONG'))
+if not ok then failures = failures + 1 end
 print(failures == 0 and 'ALL OK' or (failures .. ' FAILED'))
 os.exit(failures == 0 and 0 or 1)

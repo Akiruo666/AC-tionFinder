@@ -27,9 +27,12 @@ open *AC-tionFinder* from the app bar on the right.
   Click a row (for example the name) to follow that car. The lap count is reset on a new
   session, a car teleport (back to the pits) and a driver connecting or disconnecting.
 - **Tower** (separate window *AC-tionFinder Tower* in the app bar): a minimal classification like
-  on TV: position, the skin's livery icon, the name (full name or initials, right click to switch)
-  and the gap to the car ahead, coloured when cars are close. Click a row to follow that car. It
-  hides itself while CSP makes a screenshot (photo mode).
+  on TV: lap and race time on top, then position, the skin's livery icon, the name and the gap to
+  the car ahead, coloured when cars are close; the leader in blue. Right click on the tower:
+  full names or initials, and extra columns (gap to the leader, distance, lap, last and best lap,
+  speed, car number). Click a row to follow that car. It hides itself while CSP makes a
+  screenshot (photo mode). A car that teleports back to the pits keeps its place (shown as PIT)
+  instead of jumping to the top.
 - **Jump test**: jumps in the replay with `ac.setReplayPosition` (buttons, slider) and keeps
   following the same car, or jumps back 10 s and follows another car. It shows whether the jump worked.
 - **Replay file**: finds the replay that plays (`ac.getReplayFilename()`, else `cfg/race.ini`),
